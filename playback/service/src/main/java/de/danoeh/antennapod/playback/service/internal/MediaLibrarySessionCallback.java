@@ -51,6 +51,7 @@ import io.reactivex.rxjava3.core.Single;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -67,6 +68,7 @@ public class MediaLibrarySessionCallback implements MediaLibraryService.MediaLib
     private static final String MEDIA_ID_CONTINUE_LISTENING = "continue_listening";
     private static final int CONTINUE_LISTENING_NUM_EPISODES = 8;
     private static final long VOICE_SEARCH_MISS_GRACE_MS = 5000;
+    private static final int MAX_ONLINE_ATTEMPTS = 4;
     private static final ImmutableList<String> BROWSABLE_MEDIA_IDS = ImmutableList.of(
             MEDIA_ID_ROOT, MEDIA_ID_QUEUE, MEDIA_ID_DOWNLOADS, MEDIA_ID_EPISODES,
             MEDIA_ID_SUBSCRIPTIONS, MEDIA_ID_CONTINUE_LISTENING);
@@ -117,6 +119,7 @@ public class MediaLibrarySessionCallback implements MediaLibraryService.MediaLib
     private final List<String> oldestWords;
     private final List<String> nextWords;
     private final List<String> numberWords;
+    private final List<String> commandWords = new ArrayList<>();
     private volatile long lastVoiceSearchMiss = 0;
 
     public MediaLibrarySessionCallback(Context context) {
@@ -125,6 +128,10 @@ public class MediaLibrarySessionCallback implements MediaLibraryService.MediaLib
         oldestWords = wordList(R.string.voice_search_oldest_words);
         nextWords = wordList(R.string.voice_search_next_words);
         numberWords = wordList(R.string.voice_search_number_words);
+        commandWords.addAll(latestWords);
+        commandWords.addAll(oldestWords);
+        commandWords.addAll(nextWords);
+        commandWords.addAll(wordList(R.string.voice_search_unplayed_words));
     }
 
     @Override
@@ -624,12 +631,23 @@ public class MediaLibrarySessionCallback implements MediaLibraryService.MediaLib
         LongList queue = DBReader.getQueueIDList();
         long feedId = feed != null ? feed.getId() : 0;
         boolean ordered = latest || oldest || next;
-        FeedItem match = ordered && feed != null ? null : findBestEpisode(feedId, words, queue);
+        List<String> informativeWords = new ArrayList<>();
+        FeedItem match = ordered && feed != null ? null : findBestEpisode(feedId, words, queue, informativeWords);
         if (match != null) {
             return match.getMedia();
         }
         if (feed == null) {
-            return null;
+            feed = findOnlineFeed(query, album, artist, informativeWords);
+            if (feed == null) {
+                return null;
+            }
+            List<String> remaining = new ArrayList<>(informativeWords);
+            remaining.removeAll(Arrays.asList(normalize(feed.getTitle()).split(" ")));
+            match = ordered ? null : findBestEpisode(feed.getId(), remaining, queue, new ArrayList<>());
+            if (match != null) {
+                return match.getMedia();
+            }
+            latest = !oldest && !next;
         }
         if (latest) {
             return firstWithMedia(DBReader.getFeedItemList(feed,
@@ -687,7 +705,44 @@ public class MediaLibrarySessionCallback implements MediaLibraryService.MediaLib
 
     @WorkerThread
     @Nullable
-    private FeedItem findBestEpisode(long feedId, List<String> words, LongList queue) {
+    private Feed findOnlineFeed(String query, @Nullable String album, @Nullable String artist,
+                                List<String> informativeWords) {
+        String trustedName = !TextUtils.isEmpty(album) ? album : artist;
+        if (!TextUtils.isEmpty(trustedName)) {
+            Feed feed = OnlineVoiceSearch.findFeed(context, trustedName, normalize(trustedName), true);
+            if (feed != null) {
+                return feed;
+            }
+        }
+        List<String> queryWords = new ArrayList<>(Arrays.asList(normalize(query).split(" ")));
+        queryWords.removeAll(commandWords);
+        String normalizedQuery = TextUtils.join(" ", queryWords);
+        Feed local = null;
+        for (Feed candidate : DBReader.getFeedList()) {
+            String feedTitle = normalize(candidate.getTitle());
+            if (!feedTitle.isEmpty() && (" " + normalizedQuery + " ").contains(" " + feedTitle + " ")
+                    && (local == null || feedTitle.length() > normalize(local.getTitle()).length())) {
+                local = candidate;
+            }
+        }
+        if (local != null) {
+            return local;
+        }
+        List<String> terms = new ArrayList<>(informativeWords);
+        terms.removeAll(commandWords);
+        for (int i = 0; i < MAX_ONLINE_ATTEMPTS && terms.size() - i >= 1; i++) {
+            List<String> term = terms.subList(0, terms.size() - i);
+            Feed feed = OnlineVoiceSearch.findFeed(context, TextUtils.join(" ", term), normalizedQuery, false);
+            if (feed != null) {
+                return feed;
+            }
+        }
+        return null;
+    }
+
+    @WorkerThread
+    @Nullable
+    private FeedItem findBestEpisode(long feedId, List<String> words, LongList queue, List<String> informativeWords) {
         if (words.isEmpty()) {
             return null;
         }
@@ -696,6 +751,7 @@ public class MediaLibrarySessionCallback implements MediaLibraryService.MediaLib
                 : DBReader.getTotalEpisodeCount(FeedItemFilter.unfiltered()));
         Map<Long, FeedItem> items = new HashMap<>();
         Map<Long, Double> scores = new HashMap<>();
+        Map<Long, Integer> matchCounts = new HashMap<>();
         List<List<FeedItem>> hitLists = new ArrayList<>();
         int rarest = Integer.MAX_VALUE;
         for (String word : words) {
@@ -705,20 +761,28 @@ public class MediaLibrarySessionCallback implements MediaLibraryService.MediaLib
                 rarest = Math.min(rarest, hits.size());
             }
         }
-        for (List<FeedItem> hits : hitLists) {
-            if (hits.isEmpty() || hits.size() > Math.max(3, total / 10) || hits.size() > rarest * 5) {
+        for (int i = 0; i < words.size(); i++) {
+            List<FeedItem> hits = hitLists.get(i);
+            if (hits.size() > Math.max(3, total / 10) || hits.size() > (long) rarest * 5) {
                 continue;
             }
+            informativeWords.add(words.get(i));
             for (FeedItem hit : hits) {
                 if (hit.getMedia() != null) {
                     items.put(hit.getId(), hit);
+                    Integer count = matchCounts.get(hit.getId());
+                    matchCounts.put(hit.getId(), (count != null ? count : 0) + 1);
                     Double score = scores.get(hit.getId());
                     scores.put(hit.getId(), (score != null ? score : 0) + 1.0 / hits.size());
                 }
             }
         }
+        int requiredMatches = feedId != 0 ? 1 : Math.min(2, informativeWords.size());
         FeedItem best = null;
         for (FeedItem item : items.values()) {
+            if (matchCounts.get(item.getId()) < requiredMatches) {
+                continue;
+            }
             if (best == null || compareEpisodes(item, best, scores, words, queue) > 0) {
                 best = item;
             }
@@ -773,7 +837,7 @@ public class MediaLibrarySessionCallback implements MediaLibraryService.MediaLib
         return words;
     }
 
-    private static String normalize(@Nullable String text) {
+    static String normalize(@Nullable String text) {
         if (text == null) {
             return "";
         }

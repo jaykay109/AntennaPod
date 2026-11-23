@@ -147,7 +147,7 @@ public class MediaLibrarySessionCallbackTest {
         assertEquals(String.valueOf(inProgress.getId()), voiceSearch("an episode of Podcast Name", null));
         assertEquals(String.valueOf(inProgress.getId()),
                 voiceSearch("the episode of Podcast Name about Henry Kissinger", null));
-        assertEquals(String.valueOf(inProgress.getId()), voiceSearch("the episode about Kissinger", null));
+        assertEquals(String.valueOf(inProgress.getId()), voiceSearch("Henry Kissinger", null));
     }
 
     @Test
@@ -178,6 +178,25 @@ public class MediaLibrarySessionCallbackTest {
         DBWriter.setFeedMediaPlaybackInformation(listened).get(5, TimeUnit.SECONDS);
         assertEquals(String.valueOf(episodeOf(feed, "Four").getId()),
                 voiceSearch("the next episode of Podcast Name", null));
+    }
+
+    @Test
+    public void onVoiceSearchFindsLocalNotSubscribedPodcast() throws Exception {
+        Feed feed = new Feed("previewUrl", null, "Unsubscribed Show");
+        feed.setState(Feed.STATE_NOT_SUBSCRIBED);
+        feed.setItems(new ArrayList<>());
+        for (int i = 0; i < 2; i++) {
+            FeedItem item = new FeedItem();
+            item.setItemIdentifier("preview" + i);
+            item.setTitle("Preview " + i);
+            item.setPubDate(new Date(i * 1000L));
+            item.setMedia(new FeedMedia(item, "http://example.com/preview" + i, 2, "mime"));
+            item.setFeed(feed);
+            feed.getItems().add(item);
+        }
+        Feed saved = FeedDatabaseWriter.updateFeed(context, feed, false);
+        assertEquals(String.valueOf(episodeOf(saved, "Preview 0").getId()),
+                voiceSearch("the oldest unplayed episode of unsubscribed show", null));
     }
 
     @Test

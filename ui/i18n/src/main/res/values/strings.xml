@@ -46,6 +46,8 @@
     <string name="voice_search_oldest_words">oldest,earliest,first</string>
     <!-- Words a user may say to ask for the episode after the one they last listened to, e.g. "play the next episode of ...". Separate words with commas. -->
     <string name="voice_search_next_words">next</string>
+    <!-- Words a user may say to ask for an episode they have not heard yet, e.g. "play the oldest unplayed episode of ...". Separate words with commas. -->
+    <string name="voice_search_unplayed_words">unplayed,unheard</string>
     <!-- The spoken words for the numbers 0 to 10, in this exact order, one word per number, separated by commas. Used to match "part two" with "Part 2". -->
     <string name="voice_search_number_words">zero,one,two,three,four,five,six,seven,eight,nine,ten</string>
 
